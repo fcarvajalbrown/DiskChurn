@@ -35,4 +35,13 @@ Author: Felipe Carvajal Brown
 - build.rs sets /SUBSYSTEM:WINDOWS to suppress console window
 
 ## Current Version
-v0.1 — initial file structure, types, scanner, classifier in place
+v0.1 in progress — types, scanner, classifier done; entropy, treemap, app, main are stubs
+
+## Session Notes
+- Cargo.lock is tracked (binary crate)
+- .gitignore excludes /target only
+- CI runs on windows-latest, release build
+- MSVC C++ workload was missing — user reinstalled; cargo check should work after restart
+- Next: implement src/entropy.rs (64 KB Shannon entropy sampler)
+- .claude/settings.json has Stop hook reminding to update CLAUDE.md
+- .claude/skills/hooks.md has hooks reference doc
