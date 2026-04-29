@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\": \"Reminder: update CLAUDE.md before closing if anything changed this session.\"}'",
+            "shell": "bash"
+          }
+        ]
+      }
+    ]
+  }
+}
