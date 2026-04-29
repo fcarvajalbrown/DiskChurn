@@ -1,0 +1,5 @@
+error: can't find bin `diskchurn` at path `C:\Projects\DiskChurn\src\main.rs`
+ --> C:\Projects\DiskChurn\Cargo.toml
+error: can't find bin `diskchurn` at path `C:\Projects\DiskChurn\src\main.rs`
+ --> C:\Projects\DiskChurn\Cargo.toml
+error: could not compile due to 2 previous target resolution errors
