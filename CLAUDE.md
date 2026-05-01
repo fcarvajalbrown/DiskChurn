@@ -20,11 +20,14 @@ Author: Felipe Carvajal Brown
 - `src/app.rs` — egui App state machine, panels, drive dropdown, filters
 - `src/main.rs` — eframe::run_native bootstrap
 
+## Commits
+All commits must use conventional commits. Keep messages short and single-line.
+Valid prefixes: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`.
+
 ## Coding Rules
 - One-line comments only, informal tone
 - No multi-line or block comments
 - No emojis in code, docs, or commits
-- Commit messages: conventional commits, single short lines
 - Root-cause fixes only — no workarounds
 
 ## Architecture Notes
