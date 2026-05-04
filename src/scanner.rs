@@ -46,7 +46,7 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
             FILE_FLAG_BACKUP_SEMANTICS,
             None,
         )
-        .map_err(|e| e.to_string())?
+        .map_err(|e: windows::core::Error| e.to_string())?
     };
 
     let mut med = MFT_ENUM_DATA_V0 {

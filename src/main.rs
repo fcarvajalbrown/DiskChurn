@@ -15,6 +15,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "DiskChurn",
         options,
-        Box::new(|_cc| Ok(Box::new(app::DiskChurnApp::default()))),
+        Box::new(|_cc| Box::new(app::DiskChurnApp::default())),
     )
 }

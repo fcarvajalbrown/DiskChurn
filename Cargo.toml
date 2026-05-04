@@ -18,9 +18,11 @@ walkdir = "2"
 version = "0.56"
 features = [
     "Win32_System_Ioctl",
+    "Win32_System_IO",
     "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
+    "Win32_Security",
 ]
 
 [profile.release]
