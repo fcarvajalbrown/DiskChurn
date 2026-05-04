@@ -1,19 +1,20 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::types::{ChurnClass, FileNode, FolderStats, EntropyClass};
+use crate::types::{ChurnClass, EntropyClass, FileNode, FolderStats};
 
 const HOT_WINDOW_DAYS: f64 = 30.0;
 const VOLATILE_WINDOW_DAYS: f64 = 7.0;
 const VOLATILE_MIN_FILE_COUNT: u64 = 20;
 const COLD_UNTOUCHED_DAYS: f64 = 90.0;
 
-pub fn classify(files: &[FileNode], drive_total_bytes: u64, drive_free_bytes: u64) -> Vec<FolderStats> {
+pub fn classify(files: &[FileNode], _drive_total_bytes: u64, drive_free_bytes: u64) -> Vec<FolderStats> {
     let mut folders = build_folder_map(files);
     for folder in &mut folders {
         folder.churn = assign_churn(folder, files);
+        folder.entropy_class = assign_entropy_class(folder, files);
         if folder.churn == ChurnClass::Hot {
             folder.days_until_full =
-                project_days_until_full(folder, files, drive_total_bytes, drive_free_bytes);
+                project_days_until_full(folder, files, drive_free_bytes);
         }
     }
     folders
@@ -40,8 +41,6 @@ fn build_folder_map(files: &[FileNode]) -> Vec<FolderStats> {
             churn: ChurnClass::Cold,
             entropy_class: EntropyClass::Mixed,
             days_until_full: None,
-            reclaimable_bytes: None,
-            children: vec![],
         })
         .collect()
 }
@@ -98,11 +97,23 @@ fn assign_churn(folder: &FolderStats, files: &[FileNode]) -> ChurnClass {
     ChurnClass::Cold
 }
 
+fn assign_entropy_class(folder: &FolderStats, files: &[FileNode]) -> EntropyClass {
+    let entropies: Vec<f32> = files
+        .iter()
+        .filter(|f| f.path.parent().map(|p| p == folder.path).unwrap_or(false))
+        .filter_map(|f| f.entropy)
+        .collect();
+    if entropies.is_empty() {
+        return EntropyClass::Mixed;
+    }
+    let avg = entropies.iter().sum::<f32>() / entropies.len() as f32;
+    crate::entropy::entropy_class(avg)
+}
+
 // linear regression on (modified_timestamp, cumulative_size) to extrapolate fill date
 fn project_days_until_full(
     folder: &FolderStats,
     files: &[FileNode],
-    drive_total: u64,
     drive_free: u64,
 ) -> Option<f32> {
     let mut points: Vec<(f64, f64)> = files

@@ -19,10 +19,8 @@ pub enum EntropyClass {
 pub struct FileNode {
     pub path: PathBuf,
     pub size_bytes: u64,
-    pub created: SystemTime,
     pub modified: SystemTime,
     pub entropy: Option<f32>, // 0.0–8.0 scale, None until entropy pass
-    pub ntfs_compressed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -32,9 +30,7 @@ pub struct FolderStats {
     pub file_count: u64,
     pub churn: ChurnClass,
     pub entropy_class: EntropyClass,
-    pub days_until_full: Option<f32>,   // Some only for Hot folders
-    pub reclaimable_bytes: Option<u64>, // Some only for Compressible/Mixed
-    pub children: Vec<FolderStats>,
+    pub days_until_full: Option<f32>,
 }
 
 // full point-in-time picture of a scan

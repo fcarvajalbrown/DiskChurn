@@ -9,7 +9,6 @@ use crate::types::FileNode;
 pub enum ScanMsg {
     Batch(Vec<FileNode>),
     Done,
-    Error(String),
 }
 
 pub fn scan(drive: String, tx: Sender<ScanMsg>) {
@@ -39,7 +38,7 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
     let h: HANDLE = unsafe {
         CreateFileW(
             &HSTRING::from(volume_path.as_str()),
-            0x0, // no access needed, just the handle
+            0x0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
@@ -99,21 +98,15 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
                 let name_slice = unsafe { std::slice::from_raw_parts(name_ptr, name_len) };
                 let name = String::from_utf16_lossy(name_slice);
 
-                // build a partial path — full resolution requires parent FRN map (v0.2)
+                // partial path — full resolution requires parent FRN map (v0.2)
                 let path = PathBuf::from(format!("{}\\...\\{}", drive, name));
-
                 let modified = filetime_to_systemtime(rec.TimeStamp);
-                let created = filetime_to_systemtime(rec.TimeStamp); // USN V2 has no created; MFT walk fills this
-
-                let ntfs_compressed = rec.FileAttributes & 0x800 != 0;
 
                 batch.push(FileNode {
                     path,
                     size_bytes: 0, // USN doesn't carry size; entropy pass fills this
-                    created,
                     modified,
                     entropy: None,
-                    ntfs_compressed,
                 });
 
                 if batch.len() >= 256 {
@@ -148,15 +141,12 @@ fn scan_walkdir(drive: &str, tx: &Sender<ScanMsg>) {
         };
 
         let modified = meta.modified().unwrap_or(UNIX_EPOCH.into());
-        let created = meta.created().unwrap_or(UNIX_EPOCH.into());
 
         batch.push(FileNode {
             path,
             size_bytes: meta.len(),
-            created,
             modified,
             entropy: None,
-            ntfs_compressed: false,
         });
 
         if batch.len() >= 256 {
@@ -172,7 +162,7 @@ fn scan_walkdir(drive: &str, tx: &Sender<ScanMsg>) {
 
 fn filetime_to_systemtime(ft: i64) -> SystemTime {
     // FILETIME is 100-nanosecond intervals since 1601-01-01
-    const FILETIME_EPOCH_DIFF: u64 = 11_644_473_600; // seconds between 1601 and 1970
+    const FILETIME_EPOCH_DIFF: u64 = 11_644_473_600;
     let secs = (ft as u64 / 10_000_000).saturating_sub(FILETIME_EPOCH_DIFF);
     UNIX_EPOCH + std::time::Duration::from_secs(secs)
 }
