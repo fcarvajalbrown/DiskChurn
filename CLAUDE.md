@@ -23,6 +23,7 @@ Author: Felipe Carvajal Brown
 ## Commits
 All commits must use conventional commits. Keep messages short and single-line.
 Valid prefixes: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`.
+NEVER add a Co-Authored-By trailer or any other co-authorship line to commits.
 
 ## Coding Rules
 - One-line comments only, informal tone
