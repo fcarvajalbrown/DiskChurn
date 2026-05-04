@@ -39,10 +39,8 @@ pub enum EntropyClass { Compressible, Mixed, Dense }
 pub struct FileNode {
     pub path: PathBuf,
     pub size_bytes: u64,
-    pub created: SystemTime,
     pub modified: SystemTime,
     pub entropy: Option<f32>, // 0.0–8.0 scale, None until entropy pass
-    pub ntfs_compressed: bool,
 }
 
 pub struct FolderStats {
@@ -51,9 +49,7 @@ pub struct FolderStats {
     pub file_count: u64,
     pub churn: ChurnClass,
     pub entropy_class: EntropyClass,
-    pub days_until_full: Option<f32>,   // Some only for Hot
-    pub reclaimable_bytes: Option<u64>, // Some only for Compressible/Mixed
-    pub children: Vec<FolderStats>,
+    pub days_until_full: Option<f32>, // Some only for Hot
 }
 
 pub struct DiskSnapshot {
@@ -72,7 +68,7 @@ pub struct DiskSnapshot {
 - Scanner runs in `std::thread::spawn`, sends `FileNode` batches over `std::sync::mpsc`
 - App holds `Arc<Mutex<DiskSnapshot>>` updated as batches arrive
 - Treemap layout recomputed only on snapshot change, not every frame
-- Entropy sampler runs after MFT metadata pass; skips files where `ntfs_compressed == true`
+- Entropy pass runs inline on main thread after scan completes; MFT files with partial paths fail silently
 - `build.rs` suppresses console window via `/SUBSYSTEM:WINDOWS`
 
 ## Churn Classification Rules
@@ -103,7 +99,4 @@ Valid prefixes: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`.
 
 ## Current State (v0.1)
 
-Completed: `types.rs`, `scanner.rs`, `classifier.rs`
-Stubs (need implementation): `entropy.rs`, `treemap.rs`, `app.rs`, `main.rs`
-
-Next up: implement `src/entropy.rs` — 64 KB Shannon entropy sampler returning `EntropyClass` per file.
+All modules implemented and building clean with zero warnings.

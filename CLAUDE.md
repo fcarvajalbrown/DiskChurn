@@ -39,13 +39,13 @@ NEVER add a Co-Authored-By trailer or any other co-authorship line to commits.
 - build.rs sets /SUBSYSTEM:WINDOWS to suppress console window
 
 ## Current Version
-v0.1 in progress — types, scanner, classifier done; entropy, treemap, app, main are stubs
+v0.1 complete — all modules implemented, zero warnings, clean build
 
 ## Session Notes
 - Cargo.lock is tracked (binary crate)
-- .gitignore excludes /target only
+- .gitignore excludes /target and /.claude
 - CI runs on windows-latest, release build
-- MSVC C++ workload was missing — user reinstalled; cargo check should work after restart
-- Next: implement src/entropy.rs (64 KB Shannon entropy sampler)
 - .claude/settings.json has Stop hook reminding to update CLAUDE.md
 - .claude/skills/hooks.md has hooks reference doc
+- FileNode has no created/ntfs_compressed (removed as dead); FolderStats has no reclaimable_bytes/children
+- Entropy pass runs inline on main thread after scan completes (blocking, acceptable for v0.1)
