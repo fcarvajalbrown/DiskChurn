@@ -1,10 +1,3 @@
-mod app;
-mod classifier;
-mod entropy;
-mod scanner;
-mod treemap;
-mod types;
-
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -15,6 +8,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "DiskChurn",
         options,
-        Box::new(|_cc| Box::new(app::DiskChurnApp::default())),
+        Box::new(|_cc| Box::new(diskchurn::app::DiskChurnApp::default())),
     )
 }
