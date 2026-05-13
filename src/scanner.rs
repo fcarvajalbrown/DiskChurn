@@ -192,7 +192,7 @@ fn scan_walkdir(drive: &str, tx: &Sender<ScanMsg>) {
         .par_bridge()
         .for_each(|entry| {
             let Some(meta) = entry.metadata().ok() else { return };
-            let modified = meta.modified().unwrap_or(UNIX_EPOCH.into());
+            let modified = meta.modified().unwrap_or(UNIX_EPOCH);
             let mut node = FileNode {
                 path: entry.path().to_path_buf(),
                 size_bytes: meta.len(),
