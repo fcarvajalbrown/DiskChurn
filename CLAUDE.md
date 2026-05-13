@@ -30,6 +30,7 @@ NEVER add a Co-Authored-By trailer or any other co-authorship line to commits.
 - No multi-line or block comments
 - No emojis in code, docs, or commits
 - Root-cause fixes only — no workarounds
+- Use only conventional commits
 
 ## Architecture Notes
 - Scanner runs in std::thread::spawn, sends batches over mpsc

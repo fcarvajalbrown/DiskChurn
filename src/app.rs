@@ -1,8 +1,9 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use egui::{Color32, ComboBox, RichText, ScrollArea};
+use egui::{Color32, ComboBox, RichText, ScrollArea, Sense};
 
 use crate::{
     classifier, entropy,
@@ -27,7 +28,7 @@ pub struct DiskChurnApp {
     drives: Vec<String>,
     selected_drive: String,
     filter_churn: Option<ChurnClass>,
-    selected_folder: Option<usize>,
+    selected_folder: Option<PathBuf>,
     treemap_size: egui::Vec2,
 }
 
@@ -55,6 +56,7 @@ impl eframe::App for DiskChurnApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_rx(ctx);
         self.draw_toolbar(ctx);
+        self.draw_detail(ctx);
         self.draw_sidebar(ctx);
         self.draw_treemap(ctx);
     }
@@ -109,6 +111,66 @@ impl DiskChurnApp {
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         scanner::scan(self.selected_drive.clone(), tx);
+    }
+
+    fn draw_detail(&mut self, ctx: &egui::Context) {
+        let Some(ref selected) = self.selected_folder else { return };
+
+        let (folder_stats, top_files) = {
+            let snap = self.snapshot.lock().unwrap();
+            let stats = snap.folders.iter().find(|f| f.path == *selected).cloned();
+            let mut files: Vec<(String, u64)> = snap
+                .files
+                .iter()
+                .filter(|f| f.path.parent() == Some(selected.as_path()))
+                .map(|f| {
+                    let name = f
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (name, f.size_bytes)
+                })
+                .collect();
+            files.sort_by(|a, b| b.1.cmp(&a.1));
+            files.truncate(10);
+            (stats, files)
+        };
+
+        let Some(stats) = folder_stats else { return };
+
+        egui::TopBottomPanel::bottom("detail").min_height(160.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong(stats.path.to_string_lossy().as_ref());
+                ui.separator();
+                ui.label(format!(
+                    "{:.0} MB total  |  {} files  |  {:?}  |  {:?}",
+                    stats.total_size as f64 / 1e6,
+                    stats.file_count,
+                    stats.churn,
+                    stats.entropy_class,
+                ));
+                if let Some(days) = stats.days_until_full {
+                    ui.separator();
+                    ui.colored_label(
+                        Color32::from_rgb(220, 100, 60),
+                        format!("disk full in ~{:.0} days", days),
+                    );
+                }
+            });
+            ui.separator();
+            ScrollArea::vertical().id_source("detail_scroll").show(ui, |ui| {
+                for (name, size) in &top_files {
+                    ui.horizontal(|ui| {
+                        ui.monospace(fmt_size(*size));
+                        ui.label(name);
+                    });
+                }
+                if top_files.is_empty() {
+                    ui.label("no files found");
+                }
+            });
+        });
     }
 
     fn draw_toolbar(&mut self, ctx: &egui::Context) {
@@ -183,8 +245,8 @@ impl DiskChurnApp {
                 .collect();
             rows.sort_by(|a, b| b.1.total_size.cmp(&a.1.total_size));
             ScrollArea::vertical().show(ui, |ui| {
-                for (list_i, (_, folder)) in rows.iter().enumerate() {
-                    let selected = self.selected_folder == Some(list_i);
+                for (_, folder) in &rows {
+                    let selected = self.selected_folder.as_deref() == Some(folder.path.as_path());
                     let name = folder
                         .path
                         .file_name()
@@ -207,7 +269,7 @@ impl DiskChurnApp {
                         .selectable_label(selected, RichText::new(label).color(color))
                         .clicked()
                     {
-                        self.selected_folder = if selected { None } else { Some(list_i) };
+                        self.selected_folder = if selected { None } else { Some(folder.path.clone()) };
                     }
                 }
             });
@@ -238,9 +300,31 @@ impl DiskChurnApp {
                 });
                 return;
             }
-            let painter = ui.painter();
             let origin = ui.min_rect().min;
-            treemap::paint(painter, &self.rects, &self.display_folders, origin);
+            for r in &self.rects {
+                let folder = &self.display_folders[r.folder_index];
+                let abs_rect = egui::Rect::from_min_size(
+                    egui::Pos2::new(origin.x + r.x, origin.y + r.y),
+                    egui::vec2(r.w, r.h),
+                );
+                let response = ui.interact(abs_rect, ui.id().with(r.folder_index), Sense::click());
+                if response.clicked() {
+                    let path = folder.path.clone();
+                    let already = self.selected_folder.as_deref() == Some(path.as_path());
+                    self.selected_folder = if already { None } else { Some(path) };
+                }
+                response.on_hover_ui(|ui| {
+                    ui.label(folder.path.to_string_lossy().as_ref());
+                    ui.label(format!(
+                        "{:.1} MB  |  {} files  |  {:?}",
+                        folder.total_size as f64 / 1e6,
+                        folder.file_count,
+                        folder.churn,
+                    ));
+                });
+            }
+            let painter = ui.painter().clone();
+            treemap::paint(&painter, &self.rects, &self.display_folders, origin, self.selected_folder.as_deref());
         });
     }
 }
@@ -273,5 +357,13 @@ fn churn_color(churn: ChurnClass) -> Color32 {
         ChurnClass::Cold => Color32::from_rgb(100, 140, 210),
         ChurnClass::Hot => Color32::from_rgb(220, 100, 60),
         ChurnClass::Volatile => Color32::from_rgb(220, 190, 40),
+    }
+}
+
+fn fmt_size(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:>8.1} MB", bytes as f64 / 1e6)
+    } else {
+        format!("{:>8.0} KB", bytes as f64 / 1e3)
     }
 }

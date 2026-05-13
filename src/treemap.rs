@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::types::{ChurnClass, FolderStats};
 use egui::{Color32, FontId, Painter, Pos2, Rect, Rounding, Stroke};
 
@@ -29,33 +31,59 @@ pub fn layout(folders: &[FolderStats], width: f32, height: f32) -> Vec<TreemapRe
     out
 }
 
-pub fn paint(painter: &Painter, rects: &[TreemapRect], folders: &[FolderStats], origin: Pos2) {
+pub fn paint(painter: &Painter, rects: &[TreemapRect], folders: &[FolderStats], origin: Pos2, selected: Option<&Path>) {
     for r in rects {
         let folder = &folders[r.folder_index];
         let rect = Rect::from_min_size(
             Pos2::new(origin.x + r.x, origin.y + r.y),
             egui::vec2(r.w, r.h),
         );
-        painter.rect(
-            rect,
-            Rounding::same(2.0),
-            churn_color(&folder.churn),
-            Stroke::new(1.0, Color32::from_black_alpha(80)),
-        );
+        let is_selected = selected.map_or(false, |s| s == folder.path);
+        let stroke = if is_selected {
+            Stroke::new(2.5, Color32::WHITE)
+        } else {
+            Stroke::new(1.0, Color32::from_black_alpha(80))
+        };
+        painter.rect(rect, Rounding::same(2.0), churn_color(&folder.churn), stroke);
         if r.w > 40.0 && r.h > 20.0 {
             let name = folder
                 .path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let show_size = r.h > 36.0;
+            let name_pos = if show_size {
+                rect.center() - egui::vec2(0.0, 7.0)
+            } else {
+                rect.center()
+            };
             painter.text(
-                rect.center(),
+                name_pos,
                 egui::Align2::CENTER_CENTER,
                 name,
                 FontId::proportional(11.0),
                 Color32::WHITE,
             );
+            if show_size {
+                painter.text(
+                    rect.center() + egui::vec2(0.0, 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    fmt_size(folder.total_size),
+                    FontId::proportional(9.0),
+                    Color32::from_white_alpha(180),
+                );
+            }
         }
+    }
+}
+
+fn fmt_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else if bytes >= 1_000_000 {
+        format!("{:.0} MB", bytes as f64 / 1e6)
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1e3)
     }
 }
 
