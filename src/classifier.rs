@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::{ChurnClass, EntropyClass, FileNode, FolderStats};
@@ -9,20 +11,27 @@ const COLD_UNTOUCHED_DAYS: f64 = 90.0;
 
 pub fn classify(files: &[FileNode], _drive_total_bytes: u64, drive_free_bytes: u64) -> Vec<FolderStats> {
     let mut folders = build_folder_map(files);
+
+    // index by parent once so per-folder passes are O(1) lookup instead of O(n) scan
+    let mut by_parent: HashMap<&Path, Vec<&FileNode>> = HashMap::new();
+    for f in files {
+        if let Some(p) = f.path.parent() {
+            by_parent.entry(p).or_default().push(f);
+        }
+    }
+
     for folder in &mut folders {
-        folder.churn = assign_churn(folder, files);
-        folder.entropy_class = assign_entropy_class(folder, files);
+        let folder_files = by_parent.get(folder.path.as_path()).map_or(&[][..], |v| v.as_slice());
+        folder.churn = assign_churn(folder, folder_files);
+        folder.entropy_class = assign_entropy_class(folder_files);
         if folder.churn == ChurnClass::Hot {
-            folder.days_until_full =
-                project_days_until_full(folder, files, drive_free_bytes);
+            folder.days_until_full = project_days_until_full(folder_files, drive_free_bytes);
         }
     }
     folders
 }
 
 fn build_folder_map(files: &[FileNode]) -> Vec<FolderStats> {
-    use std::collections::HashMap;
-
     let mut map: HashMap<std::path::PathBuf, (u64, u64)> = HashMap::new();
 
     for f in files {
@@ -45,29 +54,22 @@ fn build_folder_map(files: &[FileNode]) -> Vec<FolderStats> {
         .collect()
 }
 
-fn assign_churn(folder: &FolderStats, files: &[FileNode]) -> ChurnClass {
+fn assign_churn(folder: &FolderStats, folder_files: &[&FileNode]) -> ChurnClass {
+    if folder_files.is_empty() {
+        return ChurnClass::Cold;
+    }
+
     let now = now_secs();
     let hot_cutoff = now - (HOT_WINDOW_DAYS * 86_400.0) as u64;
     let volatile_cutoff = now - (VOLATILE_WINDOW_DAYS * 86_400.0) as u64;
     let cold_cutoff = now - (COLD_UNTOUCHED_DAYS * 86_400.0) as u64;
 
-    let folder_files: Vec<&FileNode> = files
-        .iter()
-        .filter(|f| f.path.parent().map(|p| p == folder.path).unwrap_or(false))
-        .collect();
-
-    if folder_files.is_empty() {
-        return ChurnClass::Cold;
-    }
-
+    let total = folder_files.len();
     let recently_modified = folder_files
         .iter()
         .filter(|f| to_secs(f.modified) >= volatile_cutoff)
         .count();
 
-    let total = folder_files.len();
-
-    // volatile: many short-lived files churning fast
     let volatile_ratio = recently_modified as f64 / total as f64;
     if folder.file_count >= VOLATILE_MIN_FILE_COUNT && volatile_ratio > 0.6 {
         let avg_size = folder.total_size / folder.file_count.max(1);
@@ -76,33 +78,23 @@ fn assign_churn(folder: &FolderStats, files: &[FileNode]) -> ChurnClass {
         }
     }
 
-    // hot: growing — significant recent modification activity
     let hot_modified = folder_files
         .iter()
         .filter(|f| to_secs(f.modified) >= hot_cutoff)
         .count();
-    let hot_ratio = hot_modified as f64 / total as f64;
-    if hot_ratio > 0.3 {
+    if hot_modified as f64 / total as f64 > 0.3 {
         return ChurnClass::Hot;
     }
 
-    // cold: nothing touched recently
-    let any_recent = folder_files
-        .iter()
-        .any(|f| to_secs(f.modified) >= cold_cutoff);
-    if !any_recent {
+    if !folder_files.iter().any(|f| to_secs(f.modified) >= cold_cutoff) {
         return ChurnClass::Cold;
     }
 
     ChurnClass::Cold
 }
 
-fn assign_entropy_class(folder: &FolderStats, files: &[FileNode]) -> EntropyClass {
-    let entropies: Vec<f32> = files
-        .iter()
-        .filter(|f| f.path.parent().map(|p| p == folder.path).unwrap_or(false))
-        .filter_map(|f| f.entropy)
-        .collect();
+fn assign_entropy_class(folder_files: &[&FileNode]) -> EntropyClass {
+    let entropies: Vec<f32> = folder_files.iter().filter_map(|f| f.entropy).collect();
     if entropies.is_empty() {
         return EntropyClass::Mixed;
     }
@@ -111,14 +103,9 @@ fn assign_entropy_class(folder: &FolderStats, files: &[FileNode]) -> EntropyClas
 }
 
 // linear regression on (modified_timestamp, cumulative_size) to extrapolate fill date
-fn project_days_until_full(
-    folder: &FolderStats,
-    files: &[FileNode],
-    drive_free: u64,
-) -> Option<f32> {
-    let mut points: Vec<(f64, f64)> = files
+fn project_days_until_full(folder_files: &[&FileNode], drive_free: u64) -> Option<f32> {
+    let mut points: Vec<(f64, f64)> = folder_files
         .iter()
-        .filter(|f| f.path.parent().map(|p| p == folder.path).unwrap_or(false))
         .map(|f| (to_secs(f.modified) as f64, f.size_bytes as f64))
         .collect();
 
@@ -128,7 +115,6 @@ fn project_days_until_full(
 
     points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-    // cumulative size over time
     let mut cum = 0.0f64;
     let points: Vec<(f64, f64)> = points
         .into_iter()
@@ -141,11 +127,10 @@ fn project_days_until_full(
     let (slope, _intercept) = linear_regression(&points)?;
 
     if slope <= 0.0 {
-        return None; // not growing
+        return None;
     }
 
-    let free = drive_free as f64;
-    let days_left = (free / slope) / 86_400.0;
+    let days_left = (drive_free as f64 / slope) / 86_400.0;
 
     if days_left > 0.0 && days_left < 3650.0 {
         Some(days_left as f32)
