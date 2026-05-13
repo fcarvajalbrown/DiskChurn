@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChurnClass {
     Cold,
     Hot,
     Volatile,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EntropyClass {
     Compressible,
     Mixed,
@@ -23,7 +25,7 @@ pub struct FileNode {
     pub entropy: Option<f32>, // 0.0–8.0 scale, None until entropy pass
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderStats {
     pub path: PathBuf,
     pub total_size: u64,

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Felipe Carvajal Brown"]
 
+[lib]
+name = "diskchurn"
+path = "src/lib.rs"
+
 [[bin]]
 name = "diskchurn"
 path = "src/main.rs"
@@ -14,6 +18,8 @@ egui = "0.27"
 egui_plot = "0.27"
 walkdir = "2"
 rayon = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
 
 [dependencies.windows]
 version = "0.56"
