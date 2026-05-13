@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::{mpsc::Sender, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -22,7 +22,6 @@ struct FrnEntry {
 
 pub fn scan(drive: String, tx: Sender<ScanMsg>) {
     std::thread::spawn(move || {
-        // try MFT first; falls back to walkdir if it fails (non-admin or non-NTFS)
         let result = scan_mft(&drive, &tx);
         if result.is_err() {
             scan_walkdir(&drive, &tx);
@@ -35,13 +34,15 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
     let frn_map = build_frn_map(drive)?;
     let drive_root = drive.trim_end_matches('\\');
 
-    // resolve paths and sample entropy in parallel across the thread pool
-    let nodes: Vec<FileNode> = frn_map
+    // Mutex lets rayon threads flush batches as they fill — restores rolling progress
+    let shared = Mutex::new((Vec::<FileNode>::with_capacity(256), tx.clone()));
+
+    frn_map
         .par_iter()
         .filter(|(_, e)| !e.is_dir)
-        .filter_map(|(&frn, entry)| {
-            let path = resolve_path(frn, &frn_map, drive_root)?;
-            let meta = std::fs::metadata(&path).ok()?;
+        .for_each(|(&frn, entry)| {
+            let Some(path) = resolve_path(frn, &frn_map, drive_root) else { return };
+            let Some(meta) = std::fs::metadata(&path).ok() else { return };
             let mut node = FileNode {
                 path,
                 size_bytes: meta.len(),
@@ -49,13 +50,17 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
                 entropy: None,
             };
             crate::entropy::sample_entropy(&mut node);
-            Some(node)
-        })
-        .collect();
+            let mut g = shared.lock().unwrap();
+            let (batch, tx) = &mut *g;
+            batch.push(node);
+            if batch.len() >= 256 {
+                let _ = tx.send(ScanMsg::Batch(std::mem::take(batch)));
+            }
+        });
 
-    for chunk in nodes.chunks(256) {
-        tx.send(ScanMsg::Batch(chunk.to_vec()))
-            .map_err(|e| e.to_string())?;
+    let (remainder, tx) = shared.into_inner().unwrap();
+    if !remainder.is_empty() {
+        let _ = tx.send(ScanMsg::Batch(remainder));
     }
     Ok(())
 }
@@ -127,13 +132,12 @@ fn build_frn_map(drive: &str) -> Result<HashMap<u64, FrnEntry>, String> {
 
             let name_offset = rec.FileNameOffset as usize;
             let name_bytes = rec.FileNameLength as usize;
-            let name_len = name_bytes / 2;
             let name_abs_end = offset.saturating_add(name_offset).saturating_add(name_bytes);
 
-            if name_abs_end <= valid && name_len > 0 {
+            if name_abs_end <= valid && name_bytes > 0 {
                 let name_ptr = unsafe { buf.as_ptr().add(offset + name_offset) as *const u16 };
                 let name = String::from_utf16_lossy(unsafe {
-                    std::slice::from_raw_parts(name_ptr, name_len)
+                    std::slice::from_raw_parts(name_ptr, name_bytes / 2)
                 });
                 map.insert(rec.FileReferenceNumber as u64, FrnEntry {
                     name,
@@ -161,7 +165,7 @@ fn resolve_path(frn: u64, map: &HashMap<u64, FrnEntry>, drive: &str) -> Option<P
     for _ in 0..64 {
         let entry = map.get(&cur)?;
         if entry.parent_frn == cur {
-            break; // root is self-parented on NTFS
+            break;
         }
         parts.push(entry.name.clone());
         cur = entry.parent_frn;
@@ -178,15 +182,16 @@ fn resolve_path(frn: u64, map: &HashMap<u64, FrnEntry>, drive: &str) -> Option<P
 }
 
 fn scan_walkdir(drive: &str, tx: &Sender<ScanMsg>) {
-    // par_bridge feeds the serial walkdir iterator into rayon's thread pool
-    let nodes: Vec<FileNode> = WalkDir::new(drive)
+    let shared = Mutex::new((Vec::<FileNode>::with_capacity(256), tx.clone()));
+
+    WalkDir::new(drive)
         .follow_links(false)
         .into_iter()
         .flatten()
         .filter(|e| e.file_type().is_file())
         .par_bridge()
-        .filter_map(|entry| {
-            let meta = entry.metadata().ok()?;
+        .for_each(|entry| {
+            let Some(meta) = entry.metadata().ok() else { return };
             let modified = meta.modified().unwrap_or(UNIX_EPOCH.into());
             let mut node = FileNode {
                 path: entry.path().to_path_buf(),
@@ -195,12 +200,17 @@ fn scan_walkdir(drive: &str, tx: &Sender<ScanMsg>) {
                 entropy: None,
             };
             crate::entropy::sample_entropy(&mut node);
-            Some(node)
-        })
-        .collect();
+            let mut g = shared.lock().unwrap();
+            let (batch, tx) = &mut *g;
+            batch.push(node);
+            if batch.len() >= 256 {
+                let _ = tx.send(ScanMsg::Batch(std::mem::take(batch)));
+            }
+        });
 
-    for chunk in nodes.chunks(256) {
-        let _ = tx.send(ScanMsg::Batch(chunk.to_vec()));
+    let (remainder, tx) = shared.into_inner().unwrap();
+    if !remainder.is_empty() {
+        let _ = tx.send(ScanMsg::Batch(remainder));
     }
 }
 
