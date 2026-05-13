@@ -6,7 +6,8 @@ use eframe::egui;
 use egui::{Color32, ComboBox, RichText, ScrollArea, Sense};
 
 use crate::{
-    classifier,
+    classifier, delta, history,
+    delta::{DeltaKind, FolderDelta},
     scanner::{self, ScanMsg},
     treemap::{self, TreemapRect},
     types::{ChurnClass, DiskSnapshot, EntropyClass, FolderStats},
@@ -30,6 +31,14 @@ pub struct DiskChurnApp {
     filter_churn: Option<ChurnClass>,
     selected_folder: Option<PathBuf>,
     treemap_size: egui::Vec2,
+    history: Vec<(u64, u64, PathBuf)>,
+    compare_idx: Option<usize>,
+    delta: Vec<FolderDelta>,
+    display_delta: Vec<FolderDelta>,
+    delta_rects: Vec<TreemapRect>,
+    delta_size: egui::Vec2,
+    delta_min_bytes: u64,
+    delta_show: [bool; 4], // New, Grown, Shrunk, Deleted
 }
 
 impl Default for DiskChurnApp {
@@ -48,6 +57,14 @@ impl Default for DiskChurnApp {
             filter_churn: None,
             selected_folder: None,
             treemap_size: egui::Vec2::ZERO,
+            history: vec![],
+            compare_idx: None,
+            delta: vec![],
+            display_delta: vec![],
+            delta_rects: vec![],
+            delta_size: egui::Vec2::ZERO,
+            delta_min_bytes: 0,
+            delta_show: [true; 4],
         }
     }
 }
@@ -91,6 +108,11 @@ impl DiskChurnApp {
             self.state = ScanState::Done;
             self.rx = None;
             self.dirty = true;
+            {
+                let snap = self.snapshot.lock().unwrap();
+                history::save(&snap);
+            }
+            self.history = history::list(&self.selected_drive);
         }
         ctx.request_repaint();
     }
@@ -105,6 +127,11 @@ impl DiskChurnApp {
         self.selected_folder = None;
         self.dirty = false;
         self.state = ScanState::Scanning;
+        self.compare_idx = None;
+        self.delta.clear();
+        self.display_delta.clear();
+        self.delta_rects.clear();
+        self.history = history::list(&self.selected_drive);
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         scanner::scan(self.selected_drive.clone(), tx);
@@ -112,6 +139,8 @@ impl DiskChurnApp {
 
     fn draw_detail(&mut self, ctx: &egui::Context) {
         let Some(ref selected) = self.selected_folder else { return };
+
+        let delta_entry = self.delta.iter().find(|d| d.path == *selected).cloned();
 
         let (folder_stats, top_files) = {
             let snap = self.snapshot.lock().unwrap();
@@ -147,6 +176,13 @@ impl DiskChurnApp {
                     stats.churn,
                     stats.entropy_class,
                 ));
+                if let Some(ref d) = delta_entry {
+                    ui.separator();
+                    ui.colored_label(
+                        delta_sidebar_color(&d.kind),
+                        format!("{:?}  {}", d.kind, treemap::fmt_delta(d.delta)),
+                    );
+                }
                 if let Some(days) = stats.days_until_full {
                     ui.separator();
                     ui.colored_label(
@@ -180,8 +216,8 @@ impl DiskChurnApp {
                     ComboBox::from_id_source("drive_sel")
                         .selected_text(&cur)
                         .show_ui(ui, |ui| {
-                            for d in self.drives.clone() {
-                                ui.selectable_value(&mut self.selected_drive, d.clone(), d);
+                            for d in &self.drives {
+                                ui.selectable_value(&mut self.selected_drive, d.clone(), d.as_str());
                             }
                         });
                     if ui.button("Scan").clicked() {
@@ -217,12 +253,83 @@ impl DiskChurnApp {
                         ("hot", ChurnClass::Hot),
                         ("volatile", ChurnClass::Volatile),
                     ] {
-                        let active = self.filter_churn.as_ref() == Some(&class);
-                        if ui.selectable_label(active, label).clicked() {
+                        let active = self.filter_churn.as_ref() == Some(&class) && self.compare_idx.is_none();
+                        if ui.add_enabled(self.compare_idx.is_none(), egui::SelectableLabel::new(active, label)).clicked() {
                             self.filter_churn = if active { None } else { Some(class) };
                             self.selected_folder = None;
                             self.dirty = true;
                         }
+                    }
+                }
+
+                if matches!(self.state, ScanState::Done) && !self.history.is_empty() {
+                    ui.separator();
+                    ui.label("compare:");
+                    let cur_label = self.compare_idx
+                        .and_then(|i| self.history.get(i))
+                        .map(|(ts, fc, _)| format!("{} ({} files)", fmt_age(*ts), fc))
+                        .unwrap_or_else(|| "none".into());
+                    let mut load_idx: Option<usize> = None;
+                    let mut clear = false;
+                    ComboBox::from_id_source("compare_sel")
+                        .selected_text(cur_label)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(self.compare_idx.is_none(), "none").clicked() {
+                                clear = true;
+                            }
+                            for (i, (ts, fc, _)) in self.history.iter().enumerate() {
+                                let sel = self.compare_idx == Some(i);
+                                let lbl = format!("{} ({} files)", fmt_age(*ts), fc);
+                                if ui.selectable_label(sel, lbl).clicked() && !sel {
+                                    load_idx = Some(i);
+                                }
+                            }
+                        });
+                    if clear && self.compare_idx.is_some() {
+                        self.compare_idx = None;
+                        self.delta.clear();
+                        self.display_delta.clear();
+                        self.selected_folder = None;
+                        self.dirty = true;
+                    }
+                    if let Some(idx) = load_idx {
+                        let path = self.history[idx].2.clone();
+                        if let Some(snap) = history::load(&path) {
+                            let current = self.snapshot.lock().unwrap();
+                            self.delta = delta::compute(&snap, &current.folders);
+                            drop(current);
+                            self.compare_idx = Some(idx);
+                            self.selected_folder = None;
+                            self.dirty = true;
+                        }
+                    }
+                }
+
+                if self.compare_idx.is_some() {
+                    ui.separator();
+                    let prev_min = self.delta_min_bytes;
+                    ui.label("min:");
+                    ui.add(
+                        egui::Slider::new(&mut self.delta_min_bytes, 0u64..=10_737_418_240u64)
+                            .logarithmic(true)
+                            .custom_formatter(|v, _| {
+                                if v < 1.0 { "0 (all)".into() } else { fmt_size(v as u64) }
+                            })
+                            .text(""),
+                    );
+                    if self.delta_min_bytes != prev_min {
+                        self.dirty = true;
+                    }
+
+                    ui.separator();
+                    let prev_show = self.delta_show;
+                    for (i, label) in ["new", "grown", "shrunk", "deleted"].iter().enumerate() {
+                        if ui.selectable_label(self.delta_show[i], *label).clicked() {
+                            self.delta_show[i] = !self.delta_show[i];
+                        }
+                    }
+                    if self.delta_show != prev_show {
+                        self.dirty = true;
                     }
                 }
             });
@@ -231,6 +338,48 @@ impl DiskChurnApp {
 
     fn draw_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("sidebar").min_width(220.0).show(ctx, |ui| {
+            if self.compare_idx.is_some() {
+                ui.heading("Changes");
+                ui.separator();
+                let mut sorted = delta::apply_min_filter(&self.delta, self.delta_min_bytes, self.delta_show);
+                sorted.sort_by(|a, b| b.delta.unsigned_abs().cmp(&a.delta.unsigned_abs()));
+                const SIDEBAR_CAP: usize = 500;
+                let overflow = sorted.len().saturating_sub(SIDEBAR_CAP);
+                ScrollArea::vertical().show(ui, |ui| {
+                    for d in sorted.iter().take(SIDEBAR_CAP) {
+                        let selected = self.selected_folder.as_deref() == Some(d.path.as_path());
+                        let name = d.path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| d.path.to_string_lossy().into_owned());
+                        let kind_str = match d.kind {
+                            DeltaKind::New => "new",
+                            DeltaKind::Deleted => "deleted",
+                            DeltaKind::Grown => "grown",
+                            DeltaKind::Shrunk => "shrunk",
+                            DeltaKind::Unchanged => "unchanged",
+                        };
+                        let label = format!(
+                            "{}\n{}  |  {}",
+                            name,
+                            treemap::fmt_delta(d.delta),
+                            kind_str,
+                        );
+                        let color = delta_sidebar_color(&d.kind);
+                        if ui.selectable_label(selected, RichText::new(label).color(color)).clicked() {
+                            self.selected_folder = if selected { None } else { Some(d.path.clone()) };
+                        }
+                    }
+                    if overflow > 0 {
+                        ui.separator();
+                        ui.label(format!("{} more — raise min change to narrow", overflow));
+                    }
+                    if sorted.is_empty() {
+                        ui.label("no changes above threshold");
+                    }
+                });
+                return;
+            }
+
             ui.heading("Folders");
             ui.separator();
             let snap = self.snapshot.lock().unwrap();
@@ -276,6 +425,62 @@ impl DiskChurnApp {
     fn draw_treemap(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let size = ui.available_size();
+
+            if self.compare_idx.is_some() {
+                if self.dirty || (size - self.delta_size).length() > 1.0 {
+                    self.display_delta = delta::apply_min_filter(&self.delta, self.delta_min_bytes, self.delta_show)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    self.display_delta.sort_by(|a, b| b.delta.unsigned_abs().cmp(&a.delta.unsigned_abs()));
+
+                    // drop sub-pixel entries before squarify to prevent hairline slivers
+                    let treemap_area = size.x * size.y;
+                    let total_delta: u64 = self.display_delta.iter().map(|d| d.delta.unsigned_abs()).sum();
+                    let sizes: Vec<(usize, u64)> = self.display_delta
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, d)| {
+                            total_delta == 0 || d.delta.unsigned_abs() as f32 / total_delta as f32 * treemap_area >= 1.0
+                        })
+                        .map(|(i, d)| (i, d.delta.unsigned_abs()))
+                        .collect();
+                    self.delta_rects = treemap::layout_from_sizes(&sizes, size.x, size.y);
+                    self.delta_size = size;
+                    self.dirty = false;
+                }
+                if self.display_delta.is_empty() {
+                    ui.label("no changes detected between snapshots");
+                    return;
+                }
+                let origin = ui.min_rect().min;
+                for r in &self.delta_rects {
+                    let d = &self.display_delta[r.folder_index];
+                    let abs_rect = egui::Rect::from_min_size(
+                        egui::Pos2::new(origin.x + r.x, origin.y + r.y),
+                        egui::vec2(r.w, r.h),
+                    );
+                    let response = ui.interact(abs_rect, ui.id().with(("d", r.folder_index)), Sense::click());
+                    if response.clicked() {
+                        let path = d.path.clone();
+                        let already = self.selected_folder.as_deref() == Some(path.as_path());
+                        self.selected_folder = if already { None } else { Some(path) };
+                    }
+                    response.on_hover_ui(|ui| {
+                        ui.label(d.path.to_string_lossy().as_ref());
+                        ui.label(format!(
+                            "{}  ({:.1} MB -> {:.1} MB)",
+                            treemap::fmt_delta(d.delta),
+                            d.old_size as f64 / 1e6,
+                            d.new_size as f64 / 1e6,
+                        ));
+                    });
+                }
+                let painter = ui.painter().clone();
+                treemap::paint_delta(&painter, &self.delta_rects, &self.display_delta, origin, self.selected_folder.as_deref());
+                return;
+            }
+
             if self.dirty || (size - self.treemap_size).length() > 1.0 {
                 let snap = self.snapshot.lock().unwrap();
                 self.display_folders = snap
@@ -354,6 +559,29 @@ fn churn_color(churn: ChurnClass) -> Color32 {
         ChurnClass::Cold => Color32::from_rgb(100, 140, 210),
         ChurnClass::Hot => Color32::from_rgb(220, 100, 60),
         ChurnClass::Volatile => Color32::from_rgb(220, 190, 40),
+    }
+}
+
+fn fmt_age(ts_secs: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let age = now.saturating_sub(ts_secs);
+    if age < 3600 {
+        format!("{}m ago", age / 60)
+    } else if age < 86400 {
+        format!("{}h ago", age / 3600)
+    } else {
+        format!("{}d ago", age / 86400)
+    }
+}
+
+fn delta_sidebar_color(kind: &DeltaKind) -> Color32 {
+    match kind {
+        DeltaKind::New => Color32::from_rgb(80, 200, 100),
+        DeltaKind::Grown => Color32::from_rgb(220, 100, 60),
+        DeltaKind::Shrunk => Color32::from_rgb(100, 140, 210),
+        DeltaKind::Deleted => Color32::from_rgb(140, 140, 140),
+        DeltaKind::Unchanged => Color32::from_rgb(140, 140, 140),
     }
 }
 
