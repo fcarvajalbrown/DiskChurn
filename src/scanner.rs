@@ -34,7 +34,7 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
     // phase 1: build FRN -> (name, parent_frn) map for full path resolution
     let frn_map = build_frn_map(drive)?;
 
-    // phase 2: resolve paths and stat each file for its size
+    // phase 2: resolve paths, stat for size, sample entropy
     let drive_root = drive.trim_end_matches('\\');
     let mut batch: Vec<FileNode> = Vec::with_capacity(256);
 
@@ -49,7 +49,9 @@ fn scan_mft(drive: &str, tx: &Sender<ScanMsg>) -> Result<(), String> {
             Ok(m) => m.len(),
             Err(_) => continue, // inaccessible or deleted between phase 1 and 2
         };
-        batch.push(FileNode { path, size_bytes, modified: entry.modified, entropy: None });
+        let mut node = FileNode { path, size_bytes, modified: entry.modified, entropy: None };
+        crate::entropy::sample_entropy(&mut node);
+        batch.push(node);
         if batch.len() >= 256 {
             tx.send(ScanMsg::Batch(std::mem::take(&mut batch)))
                 .map_err(|e| e.to_string())?;
@@ -96,6 +98,7 @@ fn build_frn_map(drive: &str) -> Result<HashMap<u64, FrnEntry>, String> {
     let buf_size = 256 * 1024usize;
     let mut buf: Vec<u8> = vec![0u8; buf_size];
     let mut map: HashMap<u64, FrnEntry> = HashMap::new();
+    let rec_hdr = std::mem::size_of::<USN_RECORD_V2>();
 
     loop {
         let mut bytes_returned: u32 = 0;
@@ -117,31 +120,37 @@ fn build_frn_map(drive: &str) -> Result<HashMap<u64, FrnEntry>, String> {
         }
 
         med.StartFileReferenceNumber = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let valid = bytes_returned as usize;
         let mut offset = 8usize;
 
-        while offset + std::mem::size_of::<USN_RECORD_V2>() <= bytes_returned as usize {
+        while offset + rec_hdr <= valid {
             let rec = unsafe { &*(buf.as_ptr().add(offset) as *const USN_RECORD_V2) };
-            if rec.RecordLength == 0 {
-                break;
+            let rec_len = rec.RecordLength as usize;
+            if rec_len < rec_hdr {
+                break; // malformed record
             }
 
             let name_offset = rec.FileNameOffset as usize;
-            let name_len = rec.FileNameLength as usize / 2;
-            let name_ptr = unsafe { buf.as_ptr().add(offset + name_offset) as *const u16 };
-            let name = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, name_len) });
+            let name_bytes = rec.FileNameLength as usize;
+            let name_len = name_bytes / 2;
 
-            let frn = rec.FileReferenceNumber as u64;
-            let parent_frn = rec.ParentFileReferenceNumber as u64;
-            let is_dir = rec.FileAttributes & 0x10 != 0;
+            // bounds check: name must lie within both the record and the valid buffer
+            let name_abs_end = offset.saturating_add(name_offset).saturating_add(name_bytes);
+            if name_abs_end <= valid && name_len > 0 {
+                let name_ptr = unsafe { buf.as_ptr().add(offset + name_offset) as *const u16 };
+                let name = String::from_utf16_lossy(unsafe {
+                    std::slice::from_raw_parts(name_ptr, name_len)
+                });
 
-            map.insert(frn, FrnEntry {
-                name,
-                parent_frn,
-                is_dir,
-                modified: filetime_to_systemtime(rec.TimeStamp),
-            });
+                map.insert(rec.FileReferenceNumber as u64, FrnEntry {
+                    name,
+                    parent_frn: rec.ParentFileReferenceNumber as u64,
+                    is_dir: rec.FileAttributes & 0x10 != 0,
+                    modified: filetime_to_systemtime(rec.TimeStamp),
+                });
+            }
 
-            offset += rec.RecordLength as usize;
+            offset = offset.saturating_add(rec_len);
         }
     }
 
@@ -190,13 +199,14 @@ fn scan_walkdir(drive: &str, tx: &Sender<ScanMsg>) {
         };
 
         let modified = meta.modified().unwrap_or(UNIX_EPOCH.into());
-
-        batch.push(FileNode {
+        let mut node = FileNode {
             path,
             size_bytes: meta.len(),
             modified,
             entropy: None,
-        });
+        };
+        crate::entropy::sample_entropy(&mut node);
+        batch.push(node);
 
         if batch.len() >= 256 {
             let _ = tx.send(ScanMsg::Batch(std::mem::take(&mut batch)));

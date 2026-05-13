@@ -6,7 +6,7 @@ use eframe::egui;
 use egui::{Color32, ComboBox, RichText, ScrollArea, Sense};
 
 use crate::{
-    classifier, entropy,
+    classifier,
     scanner::{self, ScanMsg},
     treemap::{self, TreemapRect},
     types::{ChurnClass, DiskSnapshot, EntropyClass, FolderStats},
@@ -81,9 +81,6 @@ impl DiskChurnApp {
                 }
             }
             if done {
-                for file in snap.files.iter_mut() {
-                    entropy::sample_entropy(file);
-                }
                 let (total, free) = disk_space(&snap.drive);
                 snap.total_bytes = total;
                 snap.free_bytes = free;
