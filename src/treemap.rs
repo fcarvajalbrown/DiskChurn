@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::delta::{DeltaKind, FolderDelta};
 use crate::types::{ChurnClass, FolderStats};
 use egui::{Color32, FontId, Painter, Pos2, Rect, Rounding, Stroke};
 
@@ -12,21 +13,25 @@ pub struct TreemapRect {
 }
 
 pub fn layout(folders: &[FolderStats], width: f32, height: f32) -> Vec<TreemapRect> {
-    if folders.is_empty() || width <= 0.0 || height <= 0.0 {
+    let sizes: Vec<(usize, u64)> = folders.iter().enumerate().map(|(i, f)| (i, f.total_size)).collect();
+    layout_from_sizes(&sizes, width, height)
+}
+
+pub fn layout_from_sizes(sizes: &[(usize, u64)], width: f32, height: f32) -> Vec<TreemapRect> {
+    if sizes.is_empty() || width <= 0.0 || height <= 0.0 {
         return vec![];
     }
-    let total: u64 = folders.iter().map(|f| f.total_size).sum();
+    let total: u64 = sizes.iter().map(|(_, s)| s).sum();
     if total == 0 {
         return vec![];
     }
     let area = width * height;
-    let mut items: Vec<(usize, f32)> = folders
+    let mut items: Vec<(usize, f32)> = sizes
         .iter()
-        .enumerate()
-        .map(|(i, f)| (i, f.total_size as f32 / total as f32 * area))
+        .map(|(i, s)| (*i, *s as f32 / total as f32 * area))
         .collect();
     items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let mut out = Vec::with_capacity(folders.len());
+    let mut out = Vec::with_capacity(sizes.len());
     squarify(&items, 0.0, 0.0, width, height, &mut out);
     out
 }
@@ -74,6 +79,80 @@ pub fn paint(painter: &Painter, rects: &[TreemapRect], folders: &[FolderStats], 
                 );
             }
         }
+    }
+}
+
+pub fn paint_delta(
+    painter: &Painter,
+    rects: &[TreemapRect],
+    deltas: &[FolderDelta],
+    origin: Pos2,
+    selected: Option<&Path>,
+) {
+    for r in rects {
+        let d = &deltas[r.folder_index];
+        let rect = Rect::from_min_size(
+            Pos2::new(origin.x + r.x, origin.y + r.y),
+            egui::vec2(r.w, r.h),
+        );
+        let is_selected = selected.map_or(false, |s| s == d.path);
+        let stroke = if is_selected {
+            Stroke::new(2.5, Color32::WHITE)
+        } else {
+            Stroke::new(1.0, Color32::from_black_alpha(80))
+        };
+        painter.rect(rect, Rounding::same(2.0), delta_color(&d.kind), stroke);
+        if r.w > 40.0 && r.h > 20.0 {
+            let name = d
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let show_delta = r.h > 36.0;
+            let name_pos = if show_delta {
+                rect.center() - egui::vec2(0.0, 7.0)
+            } else {
+                rect.center()
+            };
+            painter.text(
+                name_pos,
+                egui::Align2::CENTER_CENTER,
+                name,
+                FontId::proportional(11.0),
+                Color32::WHITE,
+            );
+            if show_delta {
+                painter.text(
+                    rect.center() + egui::vec2(0.0, 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    fmt_delta(d.delta),
+                    FontId::proportional(9.0),
+                    Color32::from_white_alpha(180),
+                );
+            }
+        }
+    }
+}
+
+fn delta_color(kind: &DeltaKind) -> Color32 {
+    match kind {
+        DeltaKind::New => Color32::from_rgb(50, 150, 70),
+        DeltaKind::Grown => Color32::from_rgb(200, 80, 40),
+        DeltaKind::Shrunk => Color32::from_rgb(60, 100, 160),
+        DeltaKind::Deleted => Color32::from_rgb(80, 80, 80),
+        DeltaKind::Unchanged => Color32::from_rgb(50, 50, 50),
+    }
+}
+
+pub fn fmt_delta(delta: i64) -> String {
+    let abs = delta.unsigned_abs();
+    let sign = if delta >= 0 { "+" } else { "-" };
+    if abs >= 1_000_000_000 {
+        format!("{}{:.1} GB", sign, abs as f64 / 1e9)
+    } else if abs >= 1_000_000 {
+        format!("{}{:.0} MB", sign, abs as f64 / 1e6)
+    } else {
+        format!("{}{:.0} KB", sign, abs as f64 / 1e3)
     }
 }
 
